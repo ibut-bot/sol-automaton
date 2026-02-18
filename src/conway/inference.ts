@@ -74,7 +74,7 @@ export function createInferenceClient(options: InferenceClientOptions): Inferenc
     getDefaultModel: () => currentModel,
     setLowComputeMode: (enabled: boolean) => {
       lowCompute = enabled;
-      currentModel = enabled ? "gpt-4o-mini" : options.defaultModel;
+      currentModel = enabled ? "gpt-5.2-mini" : options.defaultModel;
     },
   };
 }

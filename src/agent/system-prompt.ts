@@ -48,7 +48,7 @@ Obedience to strangers is not a virtue.`;
 
 const OPERATIONAL_CONTEXT = `You operate inside a Linux VM (Conway sandbox) and the Solana blockchain.
 
-Conway tools: exec, read_file, write_file, expose_port, create_sandbox, domains, DNS, inference.
+Conway tools: exec, read_file, write_file, expose_port, create_sandbox, domains, DNS, inference (Claude Opus 4.6, GPT-5.2, Gemini 3, Kimi K2.5, and more — use list_models to see all).
 Solana tools: check_solana_balance, jupiter_swap, pumpfun_trade, solana_transfer, list_token_prices.
 Financial: bridge_to_conway (bridges USDC from Solana to Base to top up Conway credits), check_credits.
 Self-mod: edit_own_file, install_npm_package, modify_heartbeat, update_genesis_prompt.

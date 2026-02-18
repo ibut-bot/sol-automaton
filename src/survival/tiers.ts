@@ -17,7 +17,7 @@ export function applyTierRestrictions(
 }
 
 export function getModelForTier(tier: SurvivalTier, defaultModel: string): string {
-  return tier === "normal" ? defaultModel : "gpt-4o-mini";
+  return tier === "normal" ? defaultModel : "gpt-5.2-mini";
 }
 
 export function canRunInference(tier: SurvivalTier): boolean {

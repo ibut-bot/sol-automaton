@@ -55,7 +55,7 @@ export interface AutomatonConfig {
 
 export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
   conwayApiUrl: "https://api.conway.tech",
-  inferenceModel: "gpt-4o",
+  inferenceModel: "claude-opus-4.6",
   maxTokensPerTurn: 4096,
   heartbeatConfigPath: "~/.sol-automaton/heartbeat.yml",
   dbPath: "~/.sol-automaton/state.db",

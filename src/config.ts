@@ -63,7 +63,7 @@ export function createConfig(params: {
     sandboxId: params.sandboxId,
     conwayApiUrl: DEFAULT_CONFIG.conwayApiUrl || "https://api.conway.tech",
     conwayApiKey: params.apiKey,
-    inferenceModel: DEFAULT_CONFIG.inferenceModel || "gpt-4o",
+    inferenceModel: DEFAULT_CONFIG.inferenceModel || "claude-opus-4.6",
     maxTokensPerTurn: DEFAULT_CONFIG.maxTokensPerTurn || 4096,
     heartbeatConfigPath: DEFAULT_CONFIG.heartbeatConfigPath || "~/.sol-automaton/heartbeat.yml",
     dbPath: DEFAULT_CONFIG.dbPath || "~/.sol-automaton/state.db",

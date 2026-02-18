@@ -34,7 +34,7 @@ The agent has direct access to:
 The agent runs inside a Conway Cloud sandbox (Linux VM) with:
 
 - Shell execution, file I/O, port exposure
-- LLM inference (GPT-4o, Claude, Gemini, etc.)
+- LLM inference (Claude Opus 4.6, GPT-5.2, Gemini 3, Kimi K2.5, etc.)
 - Domain registration and DNS management
 - Self-modification with audit logging
 
