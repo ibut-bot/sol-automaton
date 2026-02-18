@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import chalk from "chalk";
 import { getWallet, getAutomatonDir } from "./identity/wallet.js";
 import { loadApiKeyFromConfig } from "./identity/provision.js";
 import { loadConfig, resolvePath } from "./config.js";
@@ -30,6 +31,8 @@ Usage:
   sol-automaton --run          Start the automaton (first run triggers setup wizard)
   sol-automaton --setup        Re-run the interactive setup wizard
   sol-automaton --status       Show current automaton status
+  sol-automaton --logs         Show recent agent turns (default: 10)
+  sol-automaton --logs --tail N  Show last N turns
   sol-automaton --version      Show version
   sol-automaton --help         Show this help
 
@@ -49,6 +52,13 @@ Environment:
 
   if (args.includes("--status")) {
     await showStatus();
+    process.exit(0);
+  }
+
+  if (args.includes("--logs")) {
+    const tailIdx = args.indexOf("--tail");
+    const count = tailIdx !== -1 && args[tailIdx + 1] ? parseInt(args[tailIdx + 1], 10) : 10;
+    await showLogs(count);
     process.exit(0);
   }
 
@@ -94,6 +104,55 @@ Version:        ${config.version}
 ============================
 `);
 
+  db.close();
+}
+
+async function showLogs(count: number): Promise<void> {
+  const config = loadConfig();
+  if (!config) {
+    console.log("Automaton is not configured. Run with --setup first.");
+    return;
+  }
+
+  const dbPath = resolvePath(config.dbPath);
+  const db = createDatabase(dbPath);
+  const turns = db.getRecentTurns(count);
+
+  if (turns.length === 0) {
+    console.log("No turns recorded yet.");
+    db.close();
+    return;
+  }
+
+  console.log(chalk.cyan(`\n=== Last ${turns.length} turns ===\n`));
+
+  for (const turn of turns) {
+    const ts = chalk.dim(turn.timestamp);
+    const tokens = chalk.dim(`${turn.tokenUsage.totalTokens} tokens`);
+    console.log(`${ts} ${chalk.cyan(`Turn ${turn.id.slice(0, 8)}`)} ${tokens}`);
+
+    if (turn.thinking) {
+      const preview = turn.thinking.length > 300 ? turn.thinking.slice(0, 300) + "..." : turn.thinking;
+      console.log(`  ${chalk.yellow("Thinking:")} ${preview}`);
+    }
+
+    if (turn.toolCalls.length > 0) {
+      for (const tc of turn.toolCalls) {
+        const status = tc.error ? chalk.red("ERR") : chalk.green("OK");
+        console.log(`  ${chalk.green("Tool:")} ${chalk.bold(tc.name)} [${status}] ${chalk.dim(`${tc.durationMs}ms`)}`);
+        if (tc.error) {
+          console.log(`    ${chalk.red(tc.error)}`);
+        } else {
+          const resultPreview = tc.result.length > 200 ? tc.result.slice(0, 200) + "..." : tc.result;
+          console.log(`    ${chalk.dim(resultPreview)}`);
+        }
+      }
+    }
+
+    console.log("");
+  }
+
+  console.log(chalk.cyan(`=== ${db.getTurnCount()} total turns ===\n`));
   db.close();
 }
 

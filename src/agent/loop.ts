@@ -1,5 +1,6 @@
 import { Connection } from "@solana/web3.js";
 import { ulid } from "ulid";
+import chalk from "chalk";
 import type {
   AutomatonIdentity,
   AutomatonConfig,
@@ -65,13 +66,19 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
   while (rounds < MAX_TOOL_ROUNDS) {
     rounds++;
 
+    const ts = () => chalk.dim(`[${new Date().toISOString()}]`);
+
+    console.log(`\n${ts()} ${chalk.cyan(`── Round ${rounds}/${MAX_TOOL_ROUNDS} ──`)}`);
     const response = await inference.chat(messages, toolDefs);
 
     if (response.content) {
       messages.push({ role: "assistant", content: response.content });
+      console.log(`${ts()} ${chalk.yellow("THINKING:")}`);
+      console.log(chalk.white(response.content));
     }
 
     if (response.toolCalls.length === 0) {
+      console.log(`${ts()} ${chalk.dim("No tool calls — turn complete.")}`);
       const turn: TurnRecord = {
         id: ulid(),
         timestamp: new Date().toISOString(),
@@ -98,8 +105,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
 
     const toolResults = [];
     for (const toolCall of response.toolCalls) {
+      console.log(`${ts()} ${chalk.green("TOOL CALL:")} ${chalk.bold(toolCall.name)}(${JSON.stringify(toolCall.arguments)})`);
+
       const result = await executeTool(toolCall.name, toolCall.arguments, tools, toolContext);
       toolResults.push(result);
+
+      if (result.error) {
+        console.log(`${ts()} ${chalk.red("ERROR:")} ${result.error} ${chalk.dim(`(${result.durationMs}ms)`)}`);
+      } else {
+        const preview = result.result.length > 500 ? result.result.slice(0, 500) + "..." : result.result;
+        console.log(`${ts()} ${chalk.blue("RESULT:")} ${preview} ${chalk.dim(`(${result.durationMs}ms)`)}`);
+      }
 
       messages.push({
         role: "tool",
@@ -118,6 +134,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
     };
     db.insertTurn(turn);
     onTurnComplete?.(turn);
+
+    console.log(`${ts()} ${chalk.dim(`Tokens: ${response.usage.totalTokens} (prompt: ${response.usage.promptTokens}, completion: ${response.usage.completionTokens})`)}`);
 
     // Check if agent decided to sleep or die
     const currentState = db.getAgentState();
