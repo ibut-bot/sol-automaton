@@ -76,7 +76,7 @@ export const CREATE_TABLES = `
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     address TEXT NOT NULL,
-    sandbox_id TEXT NOT NULL,
+    vps_host TEXT NOT NULL DEFAULT '',
     funded_amount_cents INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'spawning',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -87,7 +87,7 @@ export const CREATE_TABLES = `
     tx_hash TEXT NOT NULL,
     agent_uri TEXT NOT NULL,
     registered_at TEXT NOT NULL DEFAULT (datetime('now')),
-    network TEXT NOT NULL DEFAULT 'eip155:8453'
+    network TEXT NOT NULL DEFAULT 'solana:mainnet'
   );
 
   CREATE TABLE IF NOT EXISTS reputation (

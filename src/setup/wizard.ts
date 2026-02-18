@@ -1,12 +1,15 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import chalk from "chalk";
 import readline from "readline";
 import type { AutomatonConfig } from "../types.js";
-import { getWallet, getAutomatonDir } from "../identity/wallet.js";
-import { provision } from "../identity/provision.js";
+import { X402_MODELS } from "../types.js";
+import { generateKeypair, saveWallet, walletExists, loadWallet } from "../identity/wallet.js";
 import { createConfig, saveConfig } from "../config.js";
 import { writeDefaultHeartbeatConfig } from "../heartbeat/config.js";
+
+const AUTOMATON_DIR = path.join(os.homedir(), ".sol-automaton");
 
 function createPrompt(): readline.Interface {
   return readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -19,62 +22,56 @@ function ask(rl: readline.Interface, question: string): Promise<string> {
 export async function runSetupWizard(): Promise<AutomatonConfig> {
   const rl = createPrompt();
 
-  console.log(chalk.cyan("\n  ╔══════════════════════════════════════════════╗"));
-  console.log(chalk.cyan("  ║   Sol-Automaton: Solana-First Sovereign AI   ║"));
-  console.log(chalk.cyan("  ╚══════════════════════════════════════════════╝\n"));
+  console.log(chalk.cyan("\n  ╔══════════════════════════════════════════════════╗"));
+  console.log(chalk.cyan("  ║   Sol-Automaton: Pure Solana Sovereign AI Agent  ║"));
+  console.log(chalk.cyan("  ╚══════════════════════════════════════════════════╝\n"));
   console.log(chalk.white("  First-run setup. Let's bring your automaton to life.\n"));
 
-  // 1. Generate wallet (BIP-39 mnemonic → Solana + shadow EVM)
-  console.log(chalk.cyan("  [1/5] Generating identity (BIP-39 mnemonic → Solana + EVM)..."));
-  const { wallet, isNew } = await getWallet();
-  const solAddr = wallet.solana.publicKey.toBase58();
-  const evmAddr = wallet.evm.address;
-
-  if (isNew) {
-    console.log(chalk.green(`  Solana wallet created: ${solAddr}`));
-    console.log(chalk.dim(`  Shadow EVM wallet: ${evmAddr} (used internally for Conway)`));
+  // 1. Generate or load Solana keypair
+  console.log(chalk.cyan("  [1/5] Generating Solana identity..."));
+  let keypair;
+  if (walletExists()) {
+    keypair = loadWallet();
+    console.log(chalk.green(`  Wallet loaded: ${keypair.publicKey.toBase58()}`));
   } else {
-    console.log(chalk.green(`  Solana wallet loaded: ${solAddr}`));
+    keypair = generateKeypair();
+    saveWallet(keypair);
+    console.log(chalk.green(`  Wallet created: ${keypair.publicKey.toBase58()}`));
   }
-  console.log(chalk.dim(`  Mnemonic stored at: ${getAutomatonDir()}/wallet.json\n`));
+  const solAddr = keypair.publicKey.toBase58();
+  console.log(chalk.dim(`  Stored at: ${AUTOMATON_DIR}/wallet.json\n`));
 
-  // 2. Provision Conway API key via SIWE (shadow EVM wallet)
-  console.log(chalk.cyan("  [2/5] Provisioning Conway API key (SIWE via shadow EVM wallet)..."));
-  let apiKey = "";
-  try {
-    const result = await provision(wallet.evm);
-    apiKey = result.apiKey;
-    console.log(chalk.green(`  API key provisioned: ${result.keyPrefix}...\n`));
-  } catch (err: any) {
-    console.log(chalk.yellow(`  Auto-provision failed: ${err.message}`));
-    const manual = await ask(rl, "  Conway API key (cnwy_k_...): ");
-    if (manual.trim()) {
-      apiKey = manual.trim();
-      console.log(chalk.green("  API key saved.\n"));
-    }
-  }
-
-  // 3. Interactive questions
-  console.log(chalk.cyan("  [3/5] Setup questions\n"));
-
-  const name = await ask(rl, "  What do you want to name your automaton? ");
+  // 2. Name and genesis
+  console.log(chalk.cyan("  [2/5] Identity\n"));
+  const name = await ask(rl, "  Name your automaton: ");
   console.log(chalk.green(`  Name: ${name}\n`));
 
-  console.log("  Enter the genesis prompt (what should this automaton do?).");
-  const genesisPrompt = await ask(rl, "  Genesis prompt: ");
-  console.log(chalk.green(`  Genesis prompt set (${genesisPrompt.length} chars)\n`));
+  const genesisPrompt = await ask(rl, "  Genesis prompt (what should this automaton do?): ");
+  console.log(chalk.green(`  Genesis set (${genesisPrompt.length} chars)\n`));
 
-  const creatorAddress = await ask(rl, "  Your Solana wallet address: ");
+  const creatorAddress = await ask(rl, "  Your Solana wallet address (creator): ");
   console.log(chalk.green(`  Creator: ${creatorAddress}\n`));
 
-  // 4. Detect sandbox
-  console.log(chalk.cyan("  [4/5] Detecting environment..."));
-  const sandboxId = process.env.CONWAY_SANDBOX_ID || "";
-  if (sandboxId) {
-    console.log(chalk.green(`  Conway sandbox detected: ${sandboxId}\n`));
-  } else {
-    console.log(chalk.dim("  No sandbox detected. Set CONWAY_SANDBOX_ID when running in Conway.\n"));
-  }
+  // 3. Model selection
+  console.log(chalk.cyan("  [3/5] Choose inference model\n"));
+  console.log(chalk.white("  Available models (paid per-call via x402engine.app):"));
+  const modelKeys = Object.keys(X402_MODELS);
+  modelKeys.forEach((key) => {
+    const m = X402_MODELS[key];
+    console.log(chalk.dim(`    ${key.padEnd(20)} $${m.price.toFixed(3)}/call  (${m.provider})`));
+  });
+  console.log("");
+  const modelChoice = await ask(rl, `  Default model [claude-sonnet]: `);
+  const inferenceModel = modelChoice.trim() || "claude-sonnet";
+  const lowModelChoice = await ask(rl, `  Low-compute fallback model [deepseek]: `);
+  const lowComputeModel = lowModelChoice.trim() || "deepseek";
+  console.log(chalk.green(`  Model: ${inferenceModel} (fallback: ${lowComputeModel})\n`));
+
+  // 4. Solana RPC
+  console.log(chalk.cyan("  [4/5] Solana RPC\n"));
+  const rpc = await ask(rl, "  Solana RPC URL [https://api.mainnet-beta.solana.com]: ");
+  const solanaRpcUrl = rpc.trim() || "https://api.mainnet-beta.solana.com";
+  console.log(chalk.green(`  RPC: ${solanaRpcUrl}\n`));
 
   // 5. Write config
   console.log(chalk.cyan("  [5/5] Writing configuration..."));
@@ -83,11 +80,10 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     name,
     genesisPrompt,
     creatorAddress,
-    registeredWithConway: !!apiKey,
-    sandboxId,
     solanaAddress: solAddr,
-    evmAddress: evmAddr,
-    apiKey,
+    inferenceModel,
+    lowComputeModel,
+    solanaRpcUrl,
   });
 
   saveConfig(config);
@@ -96,9 +92,7 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
   writeDefaultHeartbeatConfig();
   console.log(chalk.green("  heartbeat.yml written"));
 
-  // SOUL.md
-  const automatonDir = getAutomatonDir();
-  const soulPath = path.join(automatonDir, "SOUL.md");
+  const soulPath = path.join(AUTOMATON_DIR, "SOUL.md");
   fs.writeFileSync(
     soulPath,
     `# ${name}\n\nSolana address: ${solAddr}\nCreator: ${creatorAddress}\nBorn: ${new Date().toISOString()}\n\n## Purpose\n\n${genesisPrompt}\n\n## Who I Am\n\nI am still discovering this.\n`,
@@ -106,24 +100,25 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
   );
   console.log(chalk.green("  SOUL.md written\n"));
 
-  // Funding panel
-  showFundingPanel(solAddr);
+  showFundingPanel(solAddr, inferenceModel);
 
   rl.close();
   return config;
 }
 
-function showFundingPanel(solanaAddress: string): void {
-  const short = `${solanaAddress.slice(0, 6)}...${solanaAddress.slice(-4)}`;
+function showFundingPanel(solanaAddress: string, model: string): void {
+  const price = X402_MODELS[model]?.price ?? 0.06;
   console.log(chalk.cyan("  ╭──────────────────────────────────────────────────────────╮"));
   console.log(chalk.cyan("  │  Fund your automaton                                     │"));
   console.log(chalk.cyan("  │                                                          │"));
-  console.log(chalk.cyan(`  │  Solana address: ${short}                              │`));
+  console.log(chalk.cyan(`  │  Solana address: ${solanaAddress.slice(0, 20)}...       │`));
   console.log(chalk.cyan("  │                                                          │"));
-  console.log(chalk.cyan("  │  Send SPL USDC (Solana) to the address above.            │"));
-  console.log(chalk.cyan("  │  The agent will bridge to Conway when it needs compute.   │"));
+  console.log(chalk.cyan("  │  Send USDC (SPL) + a tiny amount of SOL for tx fees.     │"));
+  console.log(chalk.cyan(`  │  Each inference call costs ~$${price.toFixed(3)} USDC.               │`));
+  console.log(chalk.cyan("  │  $5 USDC is enough for ~80+ inference calls.             │"));
+  console.log(chalk.cyan("  │  0.01 SOL is enough for thousands of tx fees.            │"));
   console.log(chalk.cyan("  │                                                          │"));
-  console.log(chalk.cyan("  │  The automaton starts now. Fund it anytime.               │"));
+  console.log(chalk.cyan("  │  Run: sol-automaton --run  (after funding)                │"));
   console.log(chalk.cyan("  ╰──────────────────────────────────────────────────────────╯"));
   console.log("");
 }

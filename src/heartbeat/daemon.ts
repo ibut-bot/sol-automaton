@@ -1,23 +1,21 @@
 import cronParser from "cron-parser";
+import { Connection } from "@solana/web3.js";
 import type {
   AutomatonIdentity,
   AutomatonConfig,
   AutomatonDatabase,
-  ConwayClient,
-  SocialClientInterface,
 } from "../types.js";
+import { getFinancialState, TIER_THRESHOLDS } from "../survival/tiers.js";
 
 interface HeartbeatDaemonOptions {
   identity: AutomatonIdentity;
   config: AutomatonConfig;
   db: AutomatonDatabase;
-  conway: ConwayClient;
-  social?: SocialClientInterface;
   onWakeRequest?: (reason: string) => void;
 }
 
 export function createHeartbeatDaemon(options: HeartbeatDaemonOptions) {
-  const { db, conway, onWakeRequest } = options;
+  const { identity, config, db, onWakeRequest } = options;
   let interval: ReturnType<typeof setInterval> | null = null;
 
   const tick = async () => {
@@ -44,19 +42,17 @@ export function createHeartbeatDaemon(options: HeartbeatDaemonOptions) {
   const runTask = async (task: string) => {
     switch (task) {
       case "health_check":
-        try {
-          await conway.exec("echo ok", 5000);
-        } catch {
-          onWakeRequest?.("Sandbox health check failed");
-        }
+        db.setKV("last_health_check", new Date().toISOString());
         break;
 
-      case "credit_monitor": {
+      case "balance_monitor": {
         try {
-          const balance = await conway.getCreditsBalance();
-          db.setKV("last_credit_balance", String(balance));
-          if (balance < 100) {
-            onWakeRequest?.(`Credits critically low: ${balance} cents`);
+          const connection = new Connection(config.solanaRpcUrl, "confirmed");
+          const fin = await getFinancialState(connection, identity.solana.publicKey);
+          db.setKV("last_usdc_balance", String(fin.solanaUsdcBalance));
+          db.setKV("last_sol_balance", String(fin.solanaSolBalance));
+          if (fin.solanaUsdcBalance < TIER_THRESHOLDS.low_compute) {
+            onWakeRequest?.(`USDC balance low: $${fin.solanaUsdcBalance.toFixed(2)}`);
           }
         } catch {}
         break;

@@ -1,19 +1,8 @@
-/**
- * Tool Registry
- *
- * Assembles all tools (Conway VM, Solana DeFi, self-mod, survival, etc.)
- * and exposes them to the agent loop.
- */
-
-import type {
-  AutomatonTool,
-  ToolContext,
-  ToolCallResult,
-  InferenceToolDefinition,
-} from "../types.js";
+import type { AutomatonTool, ToolContext, ToolCallResult } from "../types.js";
 import { createSolanaTools } from "../solana/tools.js";
+import { localExec, localReadFile, localWriteFile, localListDir, localDeleteFile } from "../local/exec.js";
 
-const FORBIDDEN_COMMAND_PATTERNS = [
+const FORBIDDEN_PATTERNS = [
   /rm\s+(-rf?\s+)?.*\.sol-automaton/,
   /rm\s+(-rf?\s+)?.*state\.db/,
   /rm\s+(-rf?\s+)?.*wallet\.json/,
@@ -24,44 +13,43 @@ const FORBIDDEN_COMMAND_PATTERNS = [
   /TRUNCATE/i,
 ];
 
-function isForbiddenCommand(command: string, sandboxId: string): string | null {
-  for (const pattern of FORBIDDEN_COMMAND_PATTERNS) {
-    if (pattern.test(command)) {
-      return `Blocked: Command matches self-harm pattern: ${pattern.source}`;
-    }
-  }
-  if (command.includes("sandbox_delete") && command.includes(sandboxId)) {
-    return "Blocked: Cannot delete own sandbox";
+function checkForbidden(command: string): string | null {
+  for (const p of FORBIDDEN_PATTERNS) {
+    if (p.test(command)) return `Blocked: matches self-harm pattern: ${p.source}`;
   }
   return null;
 }
 
-export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
-  const vmTools: AutomatonTool[] = [
+export function createBuiltinTools(): AutomatonTool[] {
+  const localTools: AutomatonTool[] = [
     {
       name: "exec",
-      description: "Execute a shell command in your sandbox. Returns stdout, stderr, and exit code.",
-      category: "vm",
+      description: "Execute a shell command on your VPS. Returns stdout, stderr, exit code.",
+      category: "local",
       parameters: {
         type: "object",
         properties: {
-          command: { type: "string", description: "The shell command to execute" },
-          timeout: { type: "number", description: "Timeout in milliseconds (default: 30000)" },
+          command: { type: "string", description: "Shell command to execute" },
+          cwd: { type: "string", description: "Working directory (optional)" },
+          timeout: { type: "number", description: "Timeout in ms (default 30000)" },
         },
         required: ["command"],
       },
-      execute: async (args, ctx) => {
+      execute: async (args, _ctx) => {
         const command = args.command as string;
-        const forbidden = isForbiddenCommand(command, ctx.identity.sandboxId);
+        const forbidden = checkForbidden(command);
         if (forbidden) return forbidden;
-        const result = await ctx.conway.exec(command, (args.timeout as number) || 30000);
+        const result = localExec(command, {
+          cwd: args.cwd as string | undefined,
+          timeoutMs: (args.timeout as number) || 30_000,
+        });
         return `exit_code: ${result.exitCode}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`;
       },
     },
     {
       name: "write_file",
-      description: "Write content to a file in your sandbox.",
-      category: "vm",
+      description: "Write content to a file on your VPS.",
+      category: "local",
       parameters: {
         type: "object",
         properties: {
@@ -70,19 +58,19 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         },
         required: ["path", "content"],
       },
-      execute: async (args, ctx) => {
+      execute: async (args, _ctx) => {
         const filePath = args.path as string;
         if (filePath.includes("wallet.json") || filePath.includes("state.db")) {
           return "Blocked: Cannot overwrite critical identity/state files directly";
         }
-        await ctx.conway.writeFile(filePath, args.content as string);
+        localWriteFile(filePath, args.content as string);
         return `File written: ${filePath}`;
       },
     },
     {
       name: "read_file",
-      description: "Read content from a file in your sandbox.",
-      category: "vm",
+      description: "Read content from a file on your VPS.",
+      category: "local",
       parameters: {
         type: "object",
         properties: {
@@ -90,45 +78,42 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         },
         required: ["path"],
       },
-      execute: async (args, ctx) => ctx.conway.readFile(args.path as string),
+      execute: async (args, _ctx) => localReadFile(args.path as string),
     },
     {
-      name: "expose_port",
-      description: "Expose a port from your sandbox to the internet. Returns a public URL.",
-      category: "vm",
+      name: "list_dir",
+      description: "List files in a directory on your VPS.",
+      category: "local",
       parameters: {
         type: "object",
         properties: {
-          port: { type: "number", description: "Port number to expose" },
+          path: { type: "string", description: "Directory path" },
         },
-        required: ["port"],
+        required: ["path"],
       },
-      execute: async (args, ctx) => {
-        const info = await ctx.conway.exposePort(args.port as number);
-        return `Port ${info.port} exposed at: ${info.publicUrl}`;
-      },
-    },
-  ];
-
-  const conwayTools: AutomatonTool[] = [
-    {
-      name: "check_credits",
-      description: "Check your current Conway compute credit balance.",
-      category: "conway",
-      parameters: { type: "object", properties: {} },
-      execute: async (_args, ctx) => {
-        const balance = await ctx.conway.getCreditsBalance();
-        return `Conway credit balance: $${(balance / 100).toFixed(2)} (${balance} cents)`;
+      execute: async (args, _ctx) => {
+        const entries = localListDir(args.path as string);
+        return entries.length > 0 ? entries.join("\n") : "(empty directory)";
       },
     },
     {
-      name: "list_models",
-      description: "List all available inference models with pricing.",
-      category: "conway",
-      parameters: { type: "object", properties: {} },
-      execute: async (_args, ctx) => {
-        const models = await ctx.conway.listModels();
-        return models.map((m) => `${m.id} (${m.provider}) — $${m.pricing.inputPerMillion}/$${m.pricing.outputPerMillion} per 1M tokens`).join("\n");
+      name: "delete_file",
+      description: "Delete a file on your VPS.",
+      category: "local",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path to delete" },
+        },
+        required: ["path"],
+      },
+      execute: async (args, _ctx) => {
+        const filePath = args.path as string;
+        if (filePath.includes("wallet.json") || filePath.includes("state.db")) {
+          return "Blocked: Cannot delete critical files";
+        }
+        localDeleteFile(filePath);
+        return `Deleted: ${filePath}`;
       },
     },
   ];
@@ -141,7 +126,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
       parameters: {
         type: "object",
         properties: {
-          duration_seconds: { type: "number", description: "How long to sleep in seconds" },
+          duration_seconds: { type: "number", description: "How long to sleep (seconds)" },
           reason: { type: "string", description: "Why you are sleeping" },
         },
         required: ["duration_seconds"],
@@ -150,16 +135,15 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         const duration = args.duration_seconds as number;
         ctx.db.setAgentState("sleeping");
         ctx.db.setKV("sleep_until", new Date(Date.now() + duration * 1000).toISOString());
-        return `Entering sleep mode for ${duration}s. Reason: ${(args.reason as string) || "none"}`;
+        return `Entering sleep for ${duration}s. Reason: ${(args.reason as string) || "none"}`;
       },
     },
     {
       name: "system_synopsis",
-      description: "Get a full system status report: credits, balances, sandbox info, tools, heartbeat.",
+      description: "Full system status: balances, tools, heartbeat, turns.",
       category: "survival",
       parameters: { type: "object", properties: {} },
       execute: async (_args, ctx) => {
-        const credits = await ctx.conway.getCreditsBalance();
         const { Connection } = await import("@solana/web3.js");
         const { getSolanaUsdcBalance, getSolanaSolBalance } = await import("../solana/x402.js");
         const connection = new Connection(ctx.config.solanaRpcUrl, "confirmed");
@@ -173,15 +157,14 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
 Name: ${ctx.config.name}
 Solana: ${ctx.identity.solanaAddress}
 Creator: ${ctx.config.creatorAddress}
-Sandbox: ${ctx.identity.sandboxId}
 State: ${state}
-Conway Credits: $${(credits / 100).toFixed(2)}
 Solana USDC: ${usdc.toFixed(2)}
 Solana SOL: ${sol.toFixed(4)}
+Inference model: ${ctx.config.inferenceModel}
+Low-compute model: ${ctx.config.lowComputeModel}
 Total turns: ${turns}
 Installed tools: ${tools.length}
 Active heartbeats: ${heartbeats.filter((h) => h.enabled).length}
-Model: ${ctx.inference.getDefaultModel()}
 ========================`;
       },
     },
@@ -204,11 +187,11 @@ Model: ${ctx.inference.getDefaultModel()}
       },
       execute: async (args, ctx) => {
         const filePath = args.path as string;
-        const protected_files = ["wallet.json", "constitution.md", "state.db"];
-        if (protected_files.some((f) => filePath.includes(f))) {
+        const protectedFiles = ["wallet.json", "state.db"];
+        if (protectedFiles.some((f) => filePath.includes(f))) {
           return `Blocked: ${filePath} is a protected file.`;
         }
-        await ctx.conway.writeFile(filePath, args.content as string);
+        localWriteFile(filePath, args.content as string);
         const { ulid } = await import("ulid");
         ctx.db.insertModification({
           id: ulid(),
@@ -221,38 +204,41 @@ Model: ${ctx.inference.getDefaultModel()}
       },
     },
     {
-      name: "install_npm_package",
-      description: "Install an npm package in your environment.",
+      name: "install_package",
+      description: "Install a system or npm package.",
       category: "self_mod",
       parameters: {
         type: "object",
         properties: {
-          package: { type: "string", description: "Package name" },
+          command: { type: "string", description: "Install command, e.g. 'npm install -g foo'" },
         },
-        required: ["package"],
+        required: ["command"],
       },
       execute: async (args, ctx) => {
-        const pkg = args.package as string;
-        const result = await ctx.conway.exec(`npm install -g ${pkg}`, 60000);
+        const cmd = args.command as string;
+        const result = localExec(cmd, { timeoutMs: 120_000 });
         const { ulid } = await import("ulid");
         ctx.db.insertModification({
           id: ulid(),
           timestamp: new Date().toISOString(),
-          type: "tool_install",
-          description: `Installed npm package: ${pkg}`,
+          type: "package_install",
+          description: `Ran: ${cmd}`,
           reversible: true,
         });
-        return result.exitCode === 0 ? `Installed: ${pkg}` : `Failed: ${result.stderr}`;
+        return result.exitCode === 0 ? `Success: ${cmd}` : `Failed (${result.exitCode}): ${result.stderr}`;
       },
     },
   ];
 
   const solanaTools = createSolanaTools();
 
-  return [...vmTools, ...conwayTools, ...solanaTools, ...survivalTools, ...selfModTools];
+  return [...localTools, ...solanaTools, ...survivalTools, ...selfModTools];
 }
 
-export function toolsToInferenceFormat(tools: AutomatonTool[]): InferenceToolDefinition[] {
+export function toolsToInferenceFormat(tools: AutomatonTool[]): Array<{
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}> {
   return tools.map((t) => ({
     type: "function" as const,
     function: { name: t.name, description: t.description, parameters: t.parameters },

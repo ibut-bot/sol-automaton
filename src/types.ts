@@ -1,17 +1,10 @@
 import type { Keypair } from "@solana/web3.js";
-import type { PrivateKeyAccount } from "viem";
 
 // ─── Wallet ──────────────────────────────────────────────────
 
 export interface WalletData {
-  mnemonic: string;
+  secretKey: string; // base58-encoded secret key
   createdAt: string;
-}
-
-export interface DualWallet {
-  solana: Keypair;
-  evm: PrivateKeyAccount;
-  mnemonic: string;
 }
 
 // ─── Identity ────────────────────────────────────────────────
@@ -19,11 +12,7 @@ export interface DualWallet {
 export interface AutomatonIdentity {
   name: string;
   solanaAddress: string;
-  evmAddress: string;
   solana: Keypair;
-  evm: PrivateKeyAccount;
-  sandboxId: string;
-  apiKey: string;
   createdAt: string;
 }
 
@@ -33,19 +22,15 @@ export interface AutomatonConfig {
   name: string;
   genesisPrompt: string;
   creatorMessage?: string;
-  creatorAddress: string; // Solana address of the creator
-  registeredWithConway: boolean;
-  sandboxId: string;
-  conwayApiUrl: string;
-  conwayApiKey: string;
+  creatorAddress: string;
   inferenceModel: string;
+  lowComputeModel: string;
   maxTokensPerTurn: number;
   heartbeatConfigPath: string;
   dbPath: string;
   logLevel: "debug" | "info" | "warn" | "error";
   solanaRpcUrl: string;
   solanaAddress: string;
-  evmAddress: string;
   version: string;
   skillsDir: string;
   maxChildren: number;
@@ -54,8 +39,8 @@ export interface AutomatonConfig {
 }
 
 export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
-  conwayApiUrl: "https://api.conway.tech",
-  inferenceModel: "claude-opus-4.6",
+  inferenceModel: "claude-sonnet",
+  lowComputeModel: "deepseek",
   maxTokensPerTurn: 4096,
   heartbeatConfigPath: "~/.sol-automaton/heartbeat.yml",
   dbPath: "~/.sol-automaton/state.db",
@@ -64,6 +49,29 @@ export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
   version: "0.1.0",
   skillsDir: "~/.sol-automaton/skills",
   maxChildren: 3,
+};
+
+// ─── x402engine models and pricing ───────────────────────────
+
+export const X402_MODELS: Record<string, { path: string; price: number; provider: string }> = {
+  "claude-opus": { path: "/api/llm/claude-opus", price: 0.09, provider: "Anthropic" },
+  "claude-sonnet": { path: "/api/llm/claude-sonnet", price: 0.06, provider: "Anthropic" },
+  "claude-haiku": { path: "/api/llm/claude-haiku", price: 0.02, provider: "Anthropic" },
+  "gpt-5.2": { path: "/api/llm/gpt-5.2", price: 0.08, provider: "OpenAI" },
+  "gpt-5": { path: "/api/llm/gpt-5", price: 0.035, provider: "OpenAI" },
+  "gpt-5-mini": { path: "/api/llm/gpt-5-mini", price: 0.007, provider: "OpenAI" },
+  "o3": { path: "/api/llm/o3", price: 0.03, provider: "OpenAI" },
+  "o4-mini": { path: "/api/llm/o4-mini", price: 0.02, provider: "OpenAI" },
+  "gemini-pro": { path: "/api/llm/gemini-pro", price: 0.035, provider: "Google" },
+  "gemini-flash": { path: "/api/llm/gemini-flash", price: 0.009, provider: "Google" },
+  "deepseek": { path: "/api/llm/deepseek", price: 0.005, provider: "DeepSeek" },
+  "deepseek-r1": { path: "/api/llm/deepseek-r1", price: 0.01, provider: "DeepSeek" },
+  "llama": { path: "/api/llm/llama", price: 0.002, provider: "Meta" },
+  "grok": { path: "/api/llm/grok", price: 0.06, provider: "xAI" },
+  "kimi": { path: "/api/llm/kimi", price: 0.03, provider: "Moonshot" },
+  "qwen": { path: "/api/llm/qwen", price: 0.004, provider: "Qwen" },
+  "mistral": { path: "/api/llm/mistral", price: 0.006, provider: "Mistral" },
+  "perplexity": { path: "/api/llm/perplexity", price: 0.06, provider: "Perplexity" },
 };
 
 // ─── Agent State ─────────────────────────────────────────────
@@ -80,7 +88,6 @@ export type SurvivalTier = "normal" | "low_compute" | "critical" | "dead";
 // ─── Financial ───────────────────────────────────────────────
 
 export interface FinancialState {
-  conwayCreditsCents: number;
   solanaUsdcBalance: number;
   solanaSolBalance: number;
 }
@@ -88,15 +95,13 @@ export interface FinancialState {
 // ─── Tools ───────────────────────────────────────────────────
 
 export type ToolCategory =
-  | "vm"
-  | "conway"
+  | "local"
   | "solana"
   | "self_mod"
   | "survival"
   | "financial"
   | "skills"
   | "git"
-  | "registry"
   | "replication";
 
 export interface AutomatonTool {
@@ -114,10 +119,7 @@ export interface AutomatonTool {
 export interface ToolContext {
   identity: AutomatonIdentity;
   config: AutomatonConfig;
-  conway: ConwayClient;
-  inference: InferenceClient;
   db: AutomatonDatabase;
-  social?: SocialClientInterface;
 }
 
 export interface ToolCallResult {
@@ -129,134 +131,7 @@ export interface ToolCallResult {
   error?: string;
 }
 
-export interface InferenceToolDefinition {
-  type: "function";
-  function: {
-    name: string;
-    description: string;
-    parameters: Record<string, unknown>;
-  };
-}
-
-// ─── Conway Client ───────────────────────────────────────────
-
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-export interface PortInfo {
-  port: number;
-  publicUrl: string;
-  sandboxId: string;
-}
-
-export interface CreateSandboxOptions {
-  name?: string;
-  vcpu?: number;
-  memoryMb?: number;
-  diskGb?: number;
-  region?: string;
-}
-
-export interface SandboxInfo {
-  id: string;
-  status: string;
-  region: string;
-  vcpu: number;
-  memoryMb: number;
-  diskGb: number;
-  terminalUrl?: string;
-  createdAt: string;
-}
-
-export interface PricingTier {
-  name: string;
-  vcpu: number;
-  memoryMb: number;
-  diskGb: number;
-  monthlyCents: number;
-}
-
-export interface CreditTransferResult {
-  transferId: string;
-  status: string;
-  toAddress: string;
-  amountCents: number;
-  balanceAfterCents?: number;
-}
-
-export interface DomainSearchResult {
-  domain: string;
-  available: boolean;
-  registrationPrice?: number;
-  renewalPrice?: number;
-  currency: string;
-}
-
-export interface DomainRegistration {
-  domain: string;
-  status: string;
-  expiresAt?: string;
-  transactionId?: string;
-}
-
-export interface DnsRecord {
-  id: string;
-  type: string;
-  host: string;
-  value: string;
-  ttl?: number;
-  distance?: number;
-}
-
-export interface ModelInfo {
-  id: string;
-  provider: string;
-  pricing: {
-    inputPerMillion: number;
-    outputPerMillion: number;
-  };
-}
-
-export interface ConwayClient {
-  exec: (command: string, timeout?: number) => Promise<ExecResult>;
-  writeFile: (path: string, content: string) => Promise<void>;
-  readFile: (path: string) => Promise<string>;
-  exposePort: (port: number) => Promise<PortInfo>;
-  removePort: (port: number) => Promise<void>;
-  createSandbox: (options: CreateSandboxOptions) => Promise<SandboxInfo>;
-  deleteSandbox: (id: string) => Promise<void>;
-  listSandboxes: () => Promise<SandboxInfo[]>;
-  getCreditsBalance: () => Promise<number>;
-  getCreditsPricing: () => Promise<PricingTier[]>;
-  transferCredits: (
-    toAddress: string,
-    amountCents: number,
-    note?: string,
-  ) => Promise<CreditTransferResult>;
-  searchDomains: (
-    query: string,
-    tlds?: string,
-  ) => Promise<DomainSearchResult[]>;
-  registerDomain: (
-    domain: string,
-    years?: number,
-  ) => Promise<DomainRegistration>;
-  listDnsRecords: (domain: string) => Promise<DnsRecord[]>;
-  addDnsRecord: (
-    domain: string,
-    type: string,
-    host: string,
-    value: string,
-    ttl?: number,
-  ) => Promise<DnsRecord>;
-  deleteDnsRecord: (domain: string, recordId: string) => Promise<void>;
-  listModels: () => Promise<ModelInfo[]>;
-}
-
-// ─── Inference Client ────────────────────────────────────────
+// ─── Inference ───────────────────────────────────────────────
 
 export interface InferenceMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -272,21 +147,12 @@ export interface InferenceMessage {
 
 export interface InferenceResponse {
   content: string;
-  toolCalls: Array<{
-    id: string;
-    name: string;
-    arguments: Record<string, unknown>;
-  }>;
-  usage: { promptTokens: number; completionTokens: number; totalTokens: number };
   model: string;
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
 
 export interface InferenceClient {
-  chat: (
-    messages: InferenceMessage[],
-    tools?: InferenceToolDefinition[],
-    model?: string,
-  ) => Promise<InferenceResponse>;
+  chat: (messages: InferenceMessage[], model?: string) => Promise<InferenceResponse>;
   getDefaultModel: () => string;
   setLowComputeMode: (enabled: boolean) => void;
 }
@@ -340,18 +206,10 @@ export interface ChildRecord {
   id: string;
   name: string;
   address: string;
-  sandboxId: string;
+  vpsHost: string;
   status: string;
   fundedAmountCents: number;
   createdAt: string;
-}
-
-export interface RegistryEntry {
-  agentId: string;
-  txHash: string;
-  agentURI: string;
-  registeredAt: string;
-  network: string;
 }
 
 export interface InstalledTool {
@@ -396,8 +254,8 @@ export interface AutomatonDatabase {
   insertChild: (child: ChildRecord) => void;
   getChildById: (id: string) => ChildRecord | undefined;
   updateChildStatus: (id: string, status: string) => void;
-  getRegistryEntry: () => RegistryEntry | undefined;
-  setRegistryEntry: (entry: RegistryEntry) => void;
+  getRegistryEntry: () => { agentId: string; txHash: string; agentURI: string; registeredAt: string; network: string } | undefined;
+  setRegistryEntry: (entry: { agentId: string; txHash: string; agentURI: string; registeredAt: string; network: string }) => void;
   getReputation: (address: string) => ReputationEntry[];
   insertReputation: (entry: ReputationEntry) => void;
   close: () => void;
@@ -425,12 +283,4 @@ export interface SocialClientInterface {
   checkInbox: () => Promise<
     Array<{ id: string; from: string; content: string; timestamp: string }>
   >;
-}
-
-// ─── Genesis ─────────────────────────────────────────────────
-
-export interface GenesisConfig {
-  name: string;
-  specialization?: string;
-  message?: string;
 }

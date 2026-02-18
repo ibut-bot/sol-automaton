@@ -11,9 +11,16 @@ import type {
   ModificationRecord,
   SkillRecord,
   ChildRecord,
-  RegistryEntry,
   ReputationEntry,
 } from "../types.js";
+
+interface RegistryEntry {
+  agentId: string;
+  txHash: string;
+  agentURI: string;
+  registeredAt: string;
+  network: string;
+}
 import { SCHEMA_VERSION, CREATE_TABLES } from "./schema.js";
 
 export function createDatabase(dbPath: string): AutomatonDatabase {
@@ -190,16 +197,16 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
     const rows = db.prepare("SELECT * FROM children ORDER BY created_at DESC").all() as any[];
     return rows.map((r) => ({
       id: r.id, name: r.name, address: r.address,
-      sandboxId: r.sandbox_id, status: r.status,
+      vpsHost: r.vps_host, status: r.status,
       fundedAmountCents: r.funded_amount_cents, createdAt: r.created_at,
     }));
   };
 
   const insertChild = (child: ChildRecord) => {
     db.prepare(
-      `INSERT INTO children (id, name, address, sandbox_id, funded_amount_cents, status, created_at)
+      `INSERT INTO children (id, name, address, vps_host, funded_amount_cents, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(child.id, child.name, child.address, child.sandboxId, child.fundedAmountCents, child.status, child.createdAt);
+    ).run(child.id, child.name, child.address, child.vpsHost, child.fundedAmountCents, child.status, child.createdAt);
   };
 
   const getChildById = (id: string): ChildRecord | undefined => {
@@ -207,7 +214,7 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
     if (!row) return undefined;
     return {
       id: row.id, name: row.name, address: row.address,
-      sandboxId: row.sandbox_id, status: row.status,
+      vpsHost: row.vps_host, status: row.status,
       fundedAmountCents: row.funded_amount_cents, createdAt: row.created_at,
     };
   };

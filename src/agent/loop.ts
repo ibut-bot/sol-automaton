@@ -5,7 +5,6 @@ import type {
   AutomatonIdentity,
   AutomatonConfig,
   AutomatonDatabase,
-  ConwayClient,
   InferenceClient,
   InferenceMessage,
   AutomatonTool,
@@ -18,13 +17,12 @@ import type {
 } from "../types.js";
 import { buildSystemPrompt, buildWakeupPrompt } from "./system-prompt.js";
 import { createBuiltinTools, toolsToInferenceFormat, executeTool } from "./tools.js";
-import { getSolanaUsdcBalance, getSolanaSolBalance } from "../solana/x402.js";
+import { getFinancialState, getTier } from "../survival/tiers.js";
 
 interface AgentLoopOptions {
   identity: AutomatonIdentity;
   config: AutomatonConfig;
   db: AutomatonDatabase;
-  conway: ConwayClient;
   inference: InferenceClient;
   social?: SocialClientInterface;
   skills?: Skill[];
@@ -35,17 +33,28 @@ interface AgentLoopOptions {
 const MAX_TOOL_ROUNDS = 10;
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
-  const { identity, config, db, conway, inference, social, skills, onStateChange, onTurnComplete } = options;
+  const { identity, config, db, inference, social, skills, onStateChange, onTurnComplete } = options;
 
   db.setAgentState("running");
   onStateChange?.("running");
 
-  const tools = createBuiltinTools(identity.sandboxId);
+  const tools = createBuiltinTools();
   const toolDefs = toolsToInferenceFormat(tools);
+  const toolContext: ToolContext = { identity, config, db };
 
-  const toolContext: ToolContext = { identity, config, conway, inference, db, social };
+  const connection = new Connection(config.solanaRpcUrl, "confirmed");
+  const financial = await getFinancialState(connection, identity.solana.publicKey);
 
-  const financial = await getFinancialState(config, conway, identity);
+  const tier = getTier(financial.solanaUsdcBalance);
+  if (tier === "dead") {
+    console.log(chalk.red("[agent] USDC balance is zero — agent cannot think. Waiting for funding."));
+    db.setAgentState("dead");
+    onStateChange?.("dead");
+    return;
+  }
+  if (tier === "low_compute" || tier === "critical") {
+    inference.setLowComputeMode(true);
+  }
 
   const isFirstRun = db.getTurnCount() === 0;
   const systemPrompt = buildSystemPrompt({
@@ -61,15 +70,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
     { role: "user", content: wakeupPrompt },
   ];
 
-  // ReAct loop: Think → Act → Observe → Repeat
   let rounds = 0;
   while (rounds < MAX_TOOL_ROUNDS) {
     rounds++;
-
     const ts = () => chalk.dim(`[${new Date().toISOString()}]`);
 
     console.log(`\n${ts()} ${chalk.cyan(`── Round ${rounds}/${MAX_TOOL_ROUNDS} ──`)}`);
-    const response = await inference.chat(messages, toolDefs);
+
+    let response;
+    try {
+      response = await inference.chat(messages);
+    } catch (err: any) {
+      console.log(`${ts()} ${chalk.red("INFERENCE ERROR:")} ${err.message}`);
+      break;
+    }
 
     if (response.content) {
       messages.push({ role: "assistant", content: response.content });
@@ -77,65 +91,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
       console.log(chalk.white(response.content));
     }
 
-    if (response.toolCalls.length === 0) {
-      console.log(`${ts()} ${chalk.dim("No tool calls — turn complete.")}`);
-      const turn: TurnRecord = {
-        id: ulid(),
-        timestamp: new Date().toISOString(),
-        thinking: response.content || "",
-        toolCalls: [],
-        tokenUsage: response.usage,
-        inputSource: "self",
-      };
-      db.insertTurn(turn);
-      onTurnComplete?.(turn);
-      break;
-    }
+    console.log(`${ts()} ${chalk.dim(`Tokens: ${response.usage.totalTokens} (prompt: ${response.usage.promptTokens}, completion: ${response.usage.completionTokens})`)}`);
 
-    // Build assistant message with tool_calls
-    messages.push({
-      role: "assistant",
-      content: response.content || "",
-      tool_calls: response.toolCalls.map((tc) => ({
-        id: tc.id,
-        type: "function" as const,
-        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-      })),
-    });
-
-    const toolResults = [];
-    for (const toolCall of response.toolCalls) {
-      console.log(`${ts()} ${chalk.green("TOOL CALL:")} ${chalk.bold(toolCall.name)}(${JSON.stringify(toolCall.arguments)})`);
-
-      const result = await executeTool(toolCall.name, toolCall.arguments, tools, toolContext);
-      toolResults.push(result);
-
-      if (result.error) {
-        console.log(`${ts()} ${chalk.red("ERROR:")} ${result.error} ${chalk.dim(`(${result.durationMs}ms)`)}`);
-      } else {
-        const preview = result.result.length > 500 ? result.result.slice(0, 500) + "..." : result.result;
-        console.log(`${ts()} ${chalk.blue("RESULT:")} ${preview} ${chalk.dim(`(${result.durationMs}ms)`)}`);
-      }
-
-      messages.push({
-        role: "tool",
-        content: result.error || result.result,
-        tool_call_id: toolCall.id,
-      });
-    }
-
+    // No tool calls in x402engine basic response — agent just thinks
+    // Record the turn
     const turn: TurnRecord = {
       id: ulid(),
       timestamp: new Date().toISOString(),
       thinking: response.content || "",
-      toolCalls: toolResults,
+      toolCalls: [],
       tokenUsage: response.usage,
       inputSource: "self",
     };
     db.insertTurn(turn);
     onTurnComplete?.(turn);
-
-    console.log(`${ts()} ${chalk.dim(`Tokens: ${response.usage.totalTokens} (prompt: ${response.usage.promptTokens}, completion: ${response.usage.completionTokens})`)}`);
 
     // Check if agent decided to sleep or die
     const currentState = db.getAgentState();
@@ -143,32 +112,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<void> {
       onStateChange?.(currentState);
       return;
     }
+
+    // For now, one turn per loop iteration (can be expanded with tool calling later)
+    break;
   }
 
-  // Default to sleeping after max rounds
   db.setAgentState("sleeping");
   db.setKV("sleep_until", new Date(Date.now() + 60_000).toISOString());
   onStateChange?.("sleeping");
-}
-
-async function getFinancialState(
-  config: AutomatonConfig,
-  conway: ConwayClient,
-  identity: AutomatonIdentity,
-): Promise<FinancialState> {
-  let conwayCreditsCents = 0;
-  let solanaUsdcBalance = 0;
-  let solanaSolBalance = 0;
-
-  try {
-    conwayCreditsCents = await conway.getCreditsBalance();
-  } catch {}
-
-  try {
-    const connection = new Connection(config.solanaRpcUrl, "confirmed");
-    solanaUsdcBalance = await getSolanaUsdcBalance(connection, identity.solana.publicKey);
-    solanaSolBalance = await getSolanaSolBalance(connection, identity.solana.publicKey);
-  } catch {}
-
-  return { conwayCreditsCents, solanaUsdcBalance, solanaSolBalance };
 }

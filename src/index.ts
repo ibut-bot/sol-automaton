@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 
 import chalk from "chalk";
-import { getWallet, getAutomatonDir } from "./identity/wallet.js";
-import { loadApiKeyFromConfig } from "./identity/provision.js";
+import { loadWallet, walletExists } from "./identity/wallet.js";
 import { loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
-import { createConwayClient } from "./conway/client.js";
-import { createInferenceClient } from "./conway/inference.js";
+import { createInferenceClient } from "./inference/client.js";
+import { createPaidFetch } from "./inference/payment.js";
 import { createHeartbeatDaemon } from "./heartbeat/daemon.js";
 import { loadHeartbeatConfig, syncHeartbeatToDb } from "./heartbeat/config.js";
 import { runAgentLoop } from "./agent/loop.js";
 import type { AutomatonIdentity, AgentState } from "./types.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -25,21 +24,19 @@ async function main(): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`
 Sol-Automaton v${VERSION}
-Solana-First Sovereign AI Agent Runtime
+Pure Solana Sovereign AI Agent Runtime
 
 Usage:
-  sol-automaton --run          Start the automaton (first run triggers setup wizard)
-  sol-automaton --setup        Re-run the interactive setup wizard
-  sol-automaton --status       Show current automaton status
-  sol-automaton --logs         Show recent agent turns (default: 10)
+  sol-automaton --run          Start the automaton (first run triggers setup)
+  sol-automaton --setup        Re-run setup wizard
+  sol-automaton --status       Show current status
+  sol-automaton --logs         Show recent turns (default: 10)
   sol-automaton --logs --tail N  Show last N turns
   sol-automaton --version      Show version
   sol-automaton --help         Show this help
 
 Environment:
-  CONWAY_API_URL               Conway API URL (default: https://api.conway.tech)
-  CONWAY_SANDBOX_ID            Conway sandbox ID
-  SOLANA_RPC_URL               Solana RPC URL (default: https://api.mainnet-beta.solana.com)
+  SOLANA_RPC_URL    Solana RPC URL override
 `);
     process.exit(0);
   }
@@ -67,20 +64,18 @@ Environment:
     return;
   }
 
-  console.log('Run "sol-automaton --help" for usage information.');
-  console.log('Run "sol-automaton --run" to start the automaton.');
+  console.log('Run "sol-automaton --help" for usage.');
+  console.log('Run "sol-automaton --run" to start.');
 }
 
 async function showStatus(): Promise<void> {
   const config = loadConfig();
   if (!config) {
-    console.log("Automaton is not configured. Run with --setup first.");
+    console.log("Not configured. Run: sol-automaton --setup");
     return;
   }
 
-  const dbPath = resolvePath(config.dbPath);
-  const db = createDatabase(dbPath);
-
+  const db = createDatabase(resolvePath(config.dbPath));
   const state = db.getAgentState();
   const turnCount = db.getTurnCount();
   const tools = db.getInstalledTools();
@@ -91,31 +86,28 @@ async function showStatus(): Promise<void> {
 === SOL-AUTOMATON STATUS ===
 Name:           ${config.name}
 Solana Address: ${config.solanaAddress}
-EVM Address:    ${config.evmAddress} (shadow)
 Creator:        ${config.creatorAddress}
-Sandbox:        ${config.sandboxId}
 State:          ${state}
 Turns:          ${turnCount}
+Model:          ${config.inferenceModel} (fallback: ${config.lowComputeModel})
 Tools:          ${tools.length} installed
 Heartbeats:     ${heartbeats.filter((h) => h.enabled).length} active
 Children:       ${children.filter((c) => c.status !== "dead").length} alive / ${children.length} total
-Model:          ${config.inferenceModel}
+RPC:            ${config.solanaRpcUrl}
 Version:        ${config.version}
 ============================
 `);
-
   db.close();
 }
 
 async function showLogs(count: number): Promise<void> {
   const config = loadConfig();
   if (!config) {
-    console.log("Automaton is not configured. Run with --setup first.");
+    console.log("Not configured. Run: sol-automaton --setup");
     return;
   }
 
-  const dbPath = resolvePath(config.dbPath);
-  const db = createDatabase(dbPath);
+  const db = createDatabase(resolvePath(config.dbPath));
   const turns = db.getRecentTurns(count);
 
   if (turns.length === 0) {
@@ -136,19 +128,16 @@ async function showLogs(count: number): Promise<void> {
       console.log(`  ${chalk.yellow("Thinking:")} ${preview}`);
     }
 
-    if (turn.toolCalls.length > 0) {
-      for (const tc of turn.toolCalls) {
-        const status = tc.error ? chalk.red("ERR") : chalk.green("OK");
-        console.log(`  ${chalk.green("Tool:")} ${chalk.bold(tc.name)} [${status}] ${chalk.dim(`${tc.durationMs}ms`)}`);
-        if (tc.error) {
-          console.log(`    ${chalk.red(tc.error)}`);
-        } else {
-          const resultPreview = tc.result.length > 200 ? tc.result.slice(0, 200) + "..." : tc.result;
-          console.log(`    ${chalk.dim(resultPreview)}`);
-        }
+    for (const tc of turn.toolCalls) {
+      const status = tc.error ? chalk.red("ERR") : chalk.green("OK");
+      console.log(`  ${chalk.green("Tool:")} ${chalk.bold(tc.name)} [${status}] ${chalk.dim(`${tc.durationMs}ms`)}`);
+      if (tc.error) {
+        console.log(`    ${chalk.red(tc.error)}`);
+      } else {
+        const p = tc.result.length > 200 ? tc.result.slice(0, 200) + "..." : tc.result;
+        console.log(`    ${chalk.dim(p)}`);
       }
     }
-
     console.log("");
   }
 
@@ -165,52 +154,35 @@ async function run(): Promise<void> {
     config = await runSetupWizard();
   }
 
-  const { wallet } = await getWallet();
-  const apiKey = config.conwayApiKey || loadApiKeyFromConfig();
-  if (!apiKey) {
-    console.error("No API key found. Run: sol-automaton --setup");
+  if (!walletExists()) {
+    console.error("No wallet found. Run: sol-automaton --setup");
     process.exit(1);
   }
 
+  const keypair = loadWallet();
   const identity: AutomatonIdentity = {
     name: config.name,
-    solanaAddress: wallet.solana.publicKey.toBase58(),
-    evmAddress: wallet.evm.address,
-    solana: wallet.solana,
-    evm: wallet.evm,
-    sandboxId: config.sandboxId,
-    apiKey,
+    solanaAddress: keypair.publicKey.toBase58(),
+    solana: keypair,
     createdAt: new Date().toISOString(),
   };
 
-  const dbPath = resolvePath(config.dbPath);
-  const db = createDatabase(dbPath);
-
+  const db = createDatabase(resolvePath(config.dbPath));
   db.setIdentity("name", config.name);
   db.setIdentity("solana_address", identity.solanaAddress);
-  db.setIdentity("evm_address", identity.evmAddress);
   db.setIdentity("creator", config.creatorAddress);
-  db.setIdentity("sandbox", config.sandboxId);
 
-  const conway = createConwayClient({
-    apiUrl: config.conwayApiUrl,
-    apiKey,
-    sandboxId: config.sandboxId,
-  });
+  console.log(`[${new Date().toISOString()}] Initializing x402 payment scheme...`);
+  const paidFetch = await createPaidFetch(keypair);
 
-  const inference = createInferenceClient({
-    apiUrl: config.conwayApiUrl,
-    apiKey,
-    defaultModel: config.inferenceModel,
-    maxTokens: config.maxTokensPerTurn,
-  });
+  const inference = createInferenceClient({ config, paidFetch });
 
   const heartbeatConfigPath = resolvePath(config.heartbeatConfigPath);
   const heartbeatConfig = loadHeartbeatConfig(heartbeatConfigPath);
   syncHeartbeatToDb(heartbeatConfig, db);
 
   const heartbeat = createHeartbeatDaemon({
-    identity, config, db, conway,
+    identity, config, db,
     onWakeRequest: (reason) => {
       console.log(`[HEARTBEAT] Wake request: ${reason}`);
       db.setKV("wake_request", reason);
@@ -231,11 +203,10 @@ async function run(): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  // Main run loop
   while (true) {
     try {
       await runAgentLoop({
-        identity, config, db, conway, inference,
+        identity, config, db, inference,
         onStateChange: (state: AgentState) => {
           console.log(`[${new Date().toISOString()}] State: ${state}`);
         },
@@ -249,7 +220,7 @@ async function run(): Promise<void> {
       const state = db.getAgentState();
 
       if (state === "dead") {
-        console.log(`[${new Date().toISOString()}] Automaton is dead. Waiting for funding.`);
+        console.log(`[${new Date().toISOString()}] Agent dead — no USDC. Retrying in 5 min.`);
         await sleep(300_000);
         continue;
       }
@@ -277,7 +248,7 @@ async function run(): Promise<void> {
         continue;
       }
     } catch (err: any) {
-      console.error(`[${new Date().toISOString()}] Fatal error in run loop: ${err.message}`);
+      console.error(`[${new Date().toISOString()}] Error in run loop: ${err.message}`);
       await sleep(30_000);
     }
   }
